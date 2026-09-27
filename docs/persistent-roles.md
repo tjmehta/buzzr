@@ -15,9 +15,19 @@ provisioning creates it. Do not reuse an identity consumed by another listener.
 Run `plan --json`, then normal provisioning/reconciliation after reviewing the
 mapping. The channel **must already exist**; explicit ids are adopted, never
 inferred from labels. Normal membership/ownership permissions are still required.
-Offline role profiles use the existing profile/declaration pipeline, so they
-appear in Buzz's mention picker without an LLM process. Identity keys stay with
-the bridge; changing a runtime never changes the role's reply identity.
+Offline role profiles use the existing profile/declaration pipeline. Identity
+keys stay with the bridge; changing a runtime never changes the role's reply
+identity. Buzz client discovery still requires its native ownership evidence.
+
+For Buzz's owned-agent directory, configure each identity's `auth_tag_env` with
+the name of a protected environment entry containing its owner-signed NIP-OA
+`["auth", owner_public_key, conditions, signature]` tag. The bridge includes it
+on both kind 0 and kind 10100 profiles and republishes when the tag changes.
+Without a valid owner signature, relay membership alone does not make a role
+appear among the user's agents. Mint attestations using the owner's existing
+signer; never copy the owner's private key into the bridge. Buzz may also require
+an owner-authored kind 30177 discovery/policy record, depending on client build.
+Profile publication does not manufacture or bypass that policy.
 
 `project` and `role` are normalized ids, independent of repo paths, native session
 ids and workspace labels. Two projects sharing a repository must have distinct

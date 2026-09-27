@@ -132,6 +132,35 @@ pub fn build_agent_profile_event(
         .map_err(|error| CommandError(format!("failed to sign agent profile event: {error}")))
 }
 
+/// Preserve a configured NIP-OA owner attestation on the signed profile itself.
+/// An HTTP authentication header cannot establish ownership in Buzz clients.
+pub fn attest_profile_event(
+    event: Event,
+    private_key: &str,
+    auth_tag: Option<&str>,
+) -> Result<Event, CommandError> {
+    let Some(auth_tag) = auth_tag else {
+        return Ok(event);
+    };
+    let values: Vec<String> = serde_json::from_str(auth_tag)
+        .map_err(|_| CommandError("invalid profile owner attestation".into()))?;
+    if values.len() != 4
+        || values[0] != "auth"
+        || !is_hex64(&values[1])
+        || values[3].len() != 128
+        || !values[3].bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return err("invalid profile owner attestation");
+    }
+    let tag =
+        Tag::parse(values).map_err(|_| CommandError("invalid profile owner attestation".into()))?;
+    let keys = parse_keys(private_key, "invalid profile signing key")?;
+    EventBuilder::new(event.kind, event.content)
+        .tags([tag])
+        .sign_with_keys(&keys)
+        .map_err(|_| CommandError("cannot sign attested profile".into()))
+}
+
 /// Build the NIP-42 auth response event for a relay challenge.
 pub fn build_auth_event(
     private_key: &str,
@@ -462,8 +491,10 @@ impl ProfilePublisher for NostrTools {
         name: &str,
         about: &str,
         picture: Option<&str>,
+        auth_tag: Option<&str>,
     ) -> Result<(), CommandError> {
         let event = build_profile_event(private_key, name, about, picture)?;
+        let event = attest_profile_event(event, private_key, auth_tag)?;
         publish_event(relay_url, &event, private_key)
     }
 
@@ -473,8 +504,10 @@ impl ProfilePublisher for NostrTools {
         relay_url: &str,
         private_key: &str,
         content: &Value,
+        auth_tag: Option<&str>,
     ) -> Result<(), CommandError> {
         let event = build_agent_profile_event(private_key, content)?;
+        let event = attest_profile_event(event, private_key, auth_tag)?;
         publish_event(relay_url, &event, private_key)
     }
 }
@@ -496,6 +529,7 @@ impl NostrTools {
             name,
             about,
             picture,
+            None,
         )
     }
 
@@ -505,6 +539,12 @@ impl NostrTools {
         private_key: &str,
         content: &Value,
     ) -> Result<(), CommandError> {
-        <Self as ProfilePublisher>::publish_agent_profile(self, relay_url, private_key, content)
+        <Self as ProfilePublisher>::publish_agent_profile(
+            self,
+            relay_url,
+            private_key,
+            content,
+            None,
+        )
     }
 }

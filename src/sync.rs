@@ -203,6 +203,7 @@ fn profile_fingerprint(
     relay_url: &str,
     pack_id: Option<&str>,
     avatar_sha256: Option<&str>,
+    auth_tag: Option<&str>,
 ) -> String {
     let encoded = dump_compact_sorted(&json!({
         "public_key": profile.public_key,
@@ -211,6 +212,7 @@ fn profile_fingerprint(
         "about": profile.about,
         "avatar_pack": pack_id,
         "avatar_sha256": avatar_sha256,
+        "owner_attestation": auth_tag,
     }));
     hex::encode(Sha256::digest(encoded.as_bytes()))
 }
@@ -436,11 +438,13 @@ pub fn sync_identity_profiles<P, L, F, U>(
                 Some(chosen)
             }
         };
+        let (_, profile_auth) = profile_credentials(config, profile);
         let fingerprint = profile_fingerprint(
             profile,
             &config.bridge.relay_url,
             pack.as_ref().map(|pack| pack.pack_id.as_str()),
             avatar.as_ref().map(|avatar| avatar.sha256.as_str()),
+            profile_auth.as_deref(),
         );
         let published_at = cached
             .and_then(|cached| cached.get("published_at"))
@@ -541,6 +545,7 @@ pub fn sync_identity_profiles<P, L, F, U>(
             &profile.name,
             &profile.about,
             picture.as_deref(),
+            auth_tag.as_deref(),
         ) {
             report.warnings.push(format!(
                 "cannot publish profile for {}: {error}",
@@ -593,7 +598,12 @@ pub fn sync_agent_profiles<P: ProfilePublisher>(
         let published_at = cached
             .and_then(|cached| cached.get("published_at"))
             .and_then(Value::as_i64);
-        let fingerprint = declaration.fingerprint();
+        let (_, declaration_auth) = config
+            .identity_credentials(&declaration.identity_id)
+            .unwrap_or((None, None));
+        let fingerprint = hex::encode(Sha256::digest(
+            dump_compact_sorted(&json!([declaration.fingerprint(), declaration_auth])).as_bytes(),
+        ));
         let unchanged = cached
             .map(|cached| {
                 cached.get("public_key").and_then(Value::as_str)
@@ -628,7 +638,7 @@ pub fn sync_agent_profiles<P: ProfilePublisher>(
             continue;
         }
 
-        let (private_key, _auth_tag) = config
+        let (private_key, auth_tag) = config
             .identity_credentials(&declaration.identity_id)
             .unwrap_or((None, None));
         let private_key = match private_key {
@@ -645,6 +655,7 @@ pub fn sync_agent_profiles<P: ProfilePublisher>(
             &config.bridge.relay_url,
             &private_key,
             &declaration.content,
+            auth_tag.as_deref(),
         ) {
             report.warnings.push(format!(
                 "cannot publish agent declaration for {}: {error}",
