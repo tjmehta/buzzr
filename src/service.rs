@@ -31,6 +31,27 @@ fn now_seconds() -> i64 {
         .unwrap_or(0)
 }
 
+/// User-facing queue notices. Internal request IDs and protocol reasons belong
+/// in bridge status, not in the user's conversation.
+fn role_notice_text(name: &str, diagnostic: &Value, queued_seconds: i64) -> Option<String> {
+    let reason = diagnostic["reason"].as_str().unwrap_or("unavailable");
+    // Normal launches commonly settle within a few seconds. Avoid a status
+    // message immediately followed by the actual answer.
+    if matches!(reason, "startup" | "busy") && queued_seconds < 20 {
+        return None;
+    }
+    Some(match reason {
+        "startup" => format!("Starting {name}. Your message is queued."),
+        "busy" => format!("{name} is finishing another request. Your message is queued."),
+        "quota" => format!("{name} is waiting for available model capacity. Your message is saved and will retry."),
+        "unknown_capacity" => format!("I can't check model capacity for {name} right now. Your message is saved and will retry."),
+        "auth_error" => format!("{name} needs its model connection fixed. Your message is saved."),
+        "approval" => format!("{name} is waiting for an approval. Your message is saved."),
+        "ambiguous_delivery" | "ambiguous_activation" => format!("I couldn't confirm delivery to {name}. Your message is saved; delivery needs to be checked before retrying."),
+        _ => format!("I can't reach {name} right now. Your message is saved and will retry."),
+    })
+}
+
 fn monotonic_now() -> Instant {
     Instant::now()
 }
@@ -581,11 +602,23 @@ impl BridgeService {
         if state["role_requests"][request_id]["notice"] == reason {
             return Ok(());
         }
+        let name = self
+            .config
+            .identities
+            .get(id)
+            .map(|i| i.display_name.as_str())
+            .unwrap_or(&role.project);
+        let queued_seconds = now_seconds()
+            - state["role_requests"][request_id]["created_at"]
+                .as_i64()
+                .unwrap_or(0);
+        let Some(text) = role_notice_text(name, diagnostic, queued_seconds) else {
+            return Ok(());
+        };
         if let Some(client) = self.identity_client(id)? {
             let event = state["role_requests"][request_id]["event"]["id"]
                 .as_str()
                 .unwrap_or("");
-            let text = format!("[buzzr] Request retained for {}/{}: {}. Request {}. No duplicate activation will be started; bridge status shows the pending outcome.", role.project, role.role, reason, request_id);
             if client.send_reply(&role.channel_id, event, &text).is_ok() {
                 state["role_requests"][request_id]["notice"] = json!(reason);
                 self.checkpoint(state)?;
@@ -858,6 +891,33 @@ mod tests {
             runtime_dir.to_path_buf(),
         )
         .expect("service constructs")
+    }
+
+    #[test]
+    fn startup_notices_wait_and_use_the_display_name() {
+        let diagnostic = json!({"reason":"startup"});
+        assert_eq!(role_notice_text("typefree lead", &diagnostic, 19), None);
+        assert_eq!(
+            role_notice_text("typefree lead", &diagnostic, 20).unwrap(),
+            "Starting typefree lead. Your message is queued."
+        );
+    }
+
+    #[test]
+    fn failed_delivery_never_promises_an_automatic_retry() {
+        let text =
+            role_notice_text("typefree lead", &json!({"reason":"ambiguous_delivery"}), 0).unwrap();
+        assert!(text.contains("checked before retrying"));
+        assert!(!text.contains("will retry"));
+        assert!(!text.contains("buzzr"));
+        assert!(!text.contains("studio-lead"));
+    }
+
+    #[test]
+    fn quota_errors_are_visible_without_startup_delay() {
+        let text = role_notice_text("typefree lead", &json!({"reason":"quota"}), 0).unwrap();
+        assert!(text.contains("available model capacity"));
+        assert!(text.contains("saved"));
     }
 
     #[test]
