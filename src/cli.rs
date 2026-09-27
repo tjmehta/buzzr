@@ -1052,6 +1052,24 @@ fn cmd_deprovision(parsed: &Parsed, args: &DeprovisionArgs) -> Result<i32, CliEr
     Ok(0)
 }
 
+fn cmd_task(token: &str, request: &str) -> Result<i32, CliError> {
+    let text = if request == "-" {
+        let mut text = String::new();
+        std::io::stdin().take(70_000).read_to_string(&mut text)?;
+        text
+    } else {
+        request.to_string()
+    };
+    if text.len() > 65_535 {
+        return Err(CliError::Value("task request is too large".into()));
+    }
+    let payload: Value =
+        serde_json::from_str(&text).map_err(|_| CliError::Value("invalid task JSON".into()))?;
+    let result = crate::service::queue_task(token, payload, Duration::from_secs(90))?;
+    println!("{}", result);
+    Ok(if result["ok"] == true { 0 } else { 1 })
+}
+
 fn cmd_reply(token: &str, content: &str) -> Result<i32, CliError> {
     let content = if content == "-" {
         let mut buffer = String::new();
@@ -1085,6 +1103,10 @@ pub struct Parsed {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Command {
+    Task {
+        token: String,
+        request: String,
+    },
     RoleResolve {
         request: String,
         disposition: String,
@@ -1175,10 +1197,14 @@ pub enum ParseFailure {
     Error(String),
 }
 
-const SUBCOMMANDS: [(&str, &str); 16] = [
+const SUBCOMMANDS: [(&str, &str); 17] = [
     (
         "role-resolve",
         "resolve a retained role request after checking the native session",
+    ),
+    (
+        "task",
+        "read or update native tasks through the credential-owning bridge",
     ),
     ("init-config", "write a safe config template"),
     (
@@ -1337,6 +1363,10 @@ fn flag_specs(name: &str) -> &'static [FlagSpec] {
         "reply" => spec!(
             "--token", "TOKEN", true, true, "reply token from the bridge prompt";
             "--content", "CONTENT", true, true, "reply text, or - to read stdin";
+        ),
+        "task" => spec!(
+            "--token", "TOKEN", true, true, "role reply token from an authorized bridge request";
+            "--request", "JSON", true, true, "task operation JSON, or - to read stdin";
         ),
         _ => &[],
     }
@@ -1511,6 +1541,10 @@ fn parse_command(command_name: &str, args: &[String]) -> Result<Command, ParseFa
                 .unwrap_or_default()
                 .to_string(),
         },
+        "task" => Command::Task {
+            token: last_value(&flags, "--token").unwrap_or_default().into(),
+            request: last_value(&flags, "--request").unwrap_or_default().into(),
+        },
         _ => unreachable!("parse_command only called for known subcommands"),
     };
     Ok(command)
@@ -1600,6 +1634,7 @@ fn run(parsed: &Parsed) -> Result<i32, CliError> {
         Command::Deprovision(args) => cmd_deprovision(parsed, args),
         Command::Daemon => cmd_daemon(parsed),
         Command::Reply { token, content } => cmd_reply(token, content),
+        Command::Task { token, request } => cmd_task(token, request),
     }
 }
 

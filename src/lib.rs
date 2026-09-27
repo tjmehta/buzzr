@@ -14,3 +14,4 @@ pub mod sync;
 pub mod topology;
 
 pub mod roles;
+pub mod tasks;

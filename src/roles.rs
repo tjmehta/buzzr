@@ -21,6 +21,8 @@ pub struct PersistentRole {
     pub launcher: Vec<String>,
     /// Optional explicit enrollment time. Otherwise the first poll enrolls now.
     pub since: Option<i64>,
+    /// Opt-in native Buzz task repository, independent of local checkout paths.
+    pub tasks: Option<crate::tasks::TaskRepo>,
 }
 
 pub fn parse(raw: Option<&toml::Value>) -> Result<BTreeMap<String, PersistentRole>, ConfigError> {
@@ -34,7 +36,19 @@ pub fn parse(raw: Option<&toml::Value>) -> Result<BTreeMap<String, PersistentRol
     let mut projects = BTreeMap::new();
     let mut channels = BTreeMap::new();
     let mut bindings = HashSet::new();
+    let mut task_repositories = BTreeMap::new();
     for (id, role) in &roles {
+        if let Some(repo) = &role.tasks {
+            repo.validate().map_err(ConfigError)?;
+            if task_repositories
+                .insert(repo.coordinate(), &role.project)
+                .is_some_and(|p| p != &role.project)
+            {
+                return Err(ConfigError(
+                    "persistent projects must have distinct task repositories".into(),
+                ));
+            }
+        }
         if [id, &role.project, &role.role]
             .iter()
             .any(|s| s.is_empty() || normalize_name(s) != **s)

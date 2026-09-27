@@ -64,6 +64,7 @@ else:
             channel_name: "dev".into(),
             launcher: vec![launcher.to_str().unwrap().into()],
             since: Some(1),
+            tasks: None,
         };
         let config = Config {
             bridge: BridgeConfig {

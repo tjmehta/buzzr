@@ -294,7 +294,11 @@ async fn publish_async(
     err("relay closed the connection before accepting the event")
 }
 
-fn publish_event(relay_url: &str, event: &Event, private_key: &str) -> Result<(), CommandError> {
+pub fn publish_event(
+    relay_url: &str,
+    event: &Event,
+    private_key: &str,
+) -> Result<(), CommandError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -311,6 +315,111 @@ fn publish_event(relay_url: &str, event: &Event, private_key: &str) -> Result<()
                 PUBLISH_TIMEOUT.as_secs()
             ))
         })?
+    })
+}
+
+/// Bounded, authenticated NIP-01 read. Only verified events matching the filter
+/// are returned; EOSE is required so a disconnect cannot look like an empty list.
+pub fn query_events(
+    relay_url: &str,
+    private_key: &str,
+    filter: Value,
+) -> Result<Vec<Event>, CommandError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| CommandError("cannot start task query runtime".into()))?;
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let parsed: nostr::Filter = serde_json::from_value(filter.clone())
+                .map_err(|_| CommandError("invalid task filter".into()))?;
+            let (mut socket, _) = tokio_tungstenite::connect_async(relay_url)
+                .await
+                .map_err(|_| CommandError("task relay unavailable".into()))?;
+            let mut subscription = "buzzr-tasks-0";
+            send_frame(
+                &mut socket,
+                serde_json::json!(["REQ", subscription, filter]).to_string(),
+            )
+            .await?;
+            let mut auth_id = None;
+            let mut authenticated = false;
+            let mut events = std::collections::BTreeMap::new();
+            while let Some(message) = socket.next().await {
+                let message =
+                    message.map_err(|_| CommandError("task relay disconnected".into()))?;
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    continue;
+                };
+                let Ok(frame) = serde_json::from_str::<Vec<Value>>(&text) else {
+                    continue;
+                };
+                match frame.first().and_then(Value::as_str) {
+                    Some("AUTH") if auth_id.is_none() => {
+                        let challenge = frame.get(1).and_then(Value::as_str).unwrap_or_default();
+                        let auth = build_auth_event(private_key, challenge, relay_url)?;
+                        auth_id = Some(auth.id.to_hex());
+                        send_frame(&mut socket, relay_frame("AUTH", &auth)?).await?;
+                    }
+                    Some("OK") if frame.get(1).and_then(Value::as_str) == auth_id.as_deref() => {
+                        if frame.get(2).and_then(Value::as_bool) != Some(true) {
+                            return err("task relay authentication rejected");
+                        }
+                        if !authenticated {
+                            authenticated = true;
+                            subscription = "buzzr-tasks-1";
+                            events.clear();
+                            send_frame(
+                                &mut socket,
+                                serde_json::json!(["REQ", subscription, filter]).to_string(),
+                            )
+                            .await?;
+                        }
+                    }
+                    Some("EVENT") if frame.get(1).and_then(Value::as_str) == Some(subscription) => {
+                        let event: Event =
+                            serde_json::from_value(frame.get(2).cloned().unwrap_or(Value::Null))
+                                .map_err(|_| CommandError("invalid task event".into()))?;
+                        if event.verify().is_err()
+                            || !parsed.match_event(&event, Default::default())
+                        {
+                            return err("task event signature or scope mismatch");
+                        }
+                        events.insert(event.id, event);
+                        if events.len() >= 200 {
+                            return err("task query limit reached; refusing incomplete state");
+                        }
+                    }
+                    Some("EOSE") if frame.get(1).and_then(Value::as_str) == Some(subscription) => {
+                        if auth_id.is_none() || authenticated {
+                            return Ok(events.into_values().collect());
+                        }
+                    }
+                    Some("CLOSED")
+                        if frame.get(1).and_then(Value::as_str) == Some(subscription) =>
+                    {
+                        let reason = frame.get(2).and_then(Value::as_str).unwrap_or_default();
+                        if !authenticated && reason.starts_with("auth-required") {
+                            continue;
+                        }
+                        return err("task relay refused the query");
+                    }
+                    Some("NOTICE") => {
+                        let reason = frame.get(1).and_then(Value::as_str).unwrap_or_default();
+                        // Buzz rejects an early REQ with both NOTICE and CLOSED.
+                        // Keep the bounded AUTH handshake alive until its retry.
+                        if !authenticated && reason.starts_with("auth-required:") {
+                            continue;
+                        }
+                        return err("task relay refused the connection");
+                    }
+                    _ => {}
+                }
+            }
+            err("task relay closed before completing the query")
+        })
+        .await
+        .map_err(|_| CommandError("task query timed out".into()))?
     })
 }
 
