@@ -391,11 +391,203 @@ impl BridgeService {
                 &content,
             )
             .map_err(|error| error.to_string())?;
+        if let Some(id) = context["role_request_id"].as_str() {
+            if state["role_requests"].get(id).is_some() {
+                state["role_requests"][id]["status"] = json!("delivered");
+            }
+        }
         state
             .get_mut("reply_contexts")
             .and_then(Value::as_object_mut)
             .map(|contexts| contexts.remove(&token));
         Ok(response)
+    }
+
+    fn checkpoint(&self, state: &Value) -> Result<(), CommandError> {
+        self.store
+            .save(state)
+            .map_err(|_| CommandError("cannot persist role inbox".into()))
+    }
+
+    /// Poll configured identities even when no native process exists. Cursors
+    /// advance only after durable enqueue; delivery has its own durable ledger.
+    pub fn poll_roles(&self, state: &mut Value) -> Result<(), CommandError> {
+        let now = now_seconds();
+        for (id, role) in &self.config.bridge.persistent_roles {
+            let Some(identity) = self.config.identities.get(id) else {
+                continue;
+            };
+            let Some(client) = self.identity_client(id)? else {
+                continue;
+            };
+            let cursor = state["role_cursors"][id]
+                .as_i64()
+                .unwrap_or(role.since.unwrap_or(now));
+            if state["role_cursors"].get(id).is_none() {
+                state["role_cursors"][id] = json!(cursor);
+                self.checkpoint(state)?;
+            }
+            let events = match client.messages(&role.channel_id, cursor.saturating_sub(2)) {
+                Ok(events) => events,
+                Err(_) => {
+                    state["role_poll_errors"][id] = json!("relay_unavailable");
+                    self.checkpoint(state)?;
+                    continue;
+                }
+            };
+            let newest = events
+                .iter()
+                .filter_map(|e| e["created_at"].as_i64())
+                .max()
+                .unwrap_or(cursor);
+            for event in &events {
+                if event["id"].as_str().is_none_or(str::is_empty)
+                    || event["pubkey"].as_str() == Some(&identity.public_key)
+                    || !mentioned_pubkeys(event).contains(&identity.public_key)
+                    || !author_allowed(&self.config, event["pubkey"].as_str().unwrap_or(""))
+                {
+                    continue;
+                }
+                crate::roles::enqueue(state, id, role, event, now);
+            }
+            if events.len() >= 200 {
+                state["role_poll_errors"][id] = json!("history_gap");
+            } else {
+                state["role_poll_errors"][id] = Value::Null;
+                state["role_cursors"][id] = json!(newest.min(now).max(cursor));
+            }
+            self.checkpoint(state)?;
+        }
+        self.advance_roles(state, now)
+    }
+
+    /// At most one request per role per pass. Existing daemon/state locks also
+    /// serialize other bridge processes. The launcher owns idempotent activation.
+    pub fn advance_roles(&self, state: &mut Value, now: i64) -> Result<(), CommandError> {
+        for (id, role) in &self.config.bridge.persistent_roles {
+            let mut pending: Vec<(String, Value)> = state["role_requests"]
+                .as_object()
+                .into_iter()
+                .flat_map(|m| m.iter())
+                .filter(|(_, r)| r["role_id"].as_str() == Some(id) && r["status"] != "delivered")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            pending
+                .sort_by_key(|(k, v)| (v["event"]["created_at"].as_i64().unwrap_or(0), k.clone()));
+            let Some((request_id, request)) = pending.first() else {
+                continue;
+            };
+            if request["status"] == "sending" {
+                state["role_requests"][request_id]["status"] = json!("uncertain");
+                state["role_status"][id] = json!({"state":"uncertain","reason":"ambiguous_delivery", "request_id":request_id});
+                self.checkpoint(state)?;
+            }
+            if state["role_requests"][request_id]["status"] == "uncertain" {
+                self.role_notice(
+                    id,
+                    role,
+                    request_id,
+                    &json!({"reason":"ambiguous_delivery"}),
+                    state,
+                )?;
+                continue;
+            }
+            if request["not_before"].as_i64().unwrap_or(0) > now {
+                continue;
+            }
+            // Re-check authorization and binding after configuration changes.
+            if request["project"] != role.project
+                || request["channel_id"] != role.channel_id
+                || !self.config.identities.get(id).is_some_and(|identity| {
+                    mentioned_pubkeys(&request["event"]).contains(&identity.public_key)
+                })
+                || !author_allowed(
+                    &self.config,
+                    request["event"]["pubkey"].as_str().unwrap_or(""),
+                )
+            {
+                state["role_status"][id] = json!({"state":"blocked", "reason":"authorization_changed", "request_id":request_id});
+                self.checkpoint(state)?;
+                continue;
+            }
+            let mut ensure = json!({"version":1,"op":"ensure","project":role.project,"role":role.role,"activation_id":id});
+            let ready = crate::roles::call_launcher(&self.config, role, &ensure)
+                .unwrap_or_else(|_| json!({"state":"blocked","reason":"unavailable"}));
+            let mut diagnostic = crate::roles::diagnostic(&ready);
+            diagnostic["request_id"] = json!(request_id);
+            state["role_status"][id] = diagnostic.clone();
+            if ready["state"] != "ready" {
+                state["role_requests"][request_id]["not_before"] =
+                    json!(now + if ready["state"] == "blocked" { 60 } else { 5 });
+                self.checkpoint(state)?;
+                // A queued request is visible both in status and in its Buzz thread.
+                self.role_notice(id, role, request_id, &diagnostic, state)?;
+                continue;
+            }
+            let token = token_urlsafe(24);
+            state["reply_contexts"][&token] = json!({"identity_id":id, "channel_id":role.channel_id,"event_id":request["event"]["id"],"created_at":now, "role_request_id":request_id});
+            let prompt = format!("[Buzz persistent role]\nProject: {}\nRole: {}\nRequest: {}\n\n{}\n\nReply to this Buzz thread using the local credential-free command:\n{}", role.project, role.role, request_id, json_str(request["event"].get("content")), format_args!("env BUZZR_RUNTIME_DIR={} {} reply --token {} --content -", shlex_quote(&self.runtime_dir.to_string_lossy()), shlex_quote(&self.plugin_root.join("bin/buzzr").to_string_lossy()), shlex_quote(&token)));
+            state["role_requests"][request_id]["status"] = json!("sending");
+            state["role_requests"][request_id]["reply_token"] = json!(token);
+            self.checkpoint(state)?; // write ahead of the nontransactional terminal side effect
+            ensure["op"] = json!("deliver");
+            ensure["request_id"] = json!(request_id);
+            ensure["session"] = ready["session"].clone();
+            ensure["content"] = json!(prompt);
+            let delivery = crate::roles::call_launcher(&self.config, role, &ensure)
+                .unwrap_or_else(|_| json!({"state":"uncertain", "reason":"ambiguous_delivery"}));
+            let status = match delivery["state"].as_str() {
+                Some("delivered") => "delivered",
+                Some("busy" | "starting" | "blocked") => "queued", // contract: definitely not submitted
+                _ => "uncertain",
+            };
+            state["role_requests"][request_id]["status"] = json!(status);
+            state["role_requests"][request_id]["not_before"] = json!(now + 5);
+            if status == "queued" {
+                state["reply_contexts"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(&token);
+            }
+            state["role_status"][id] = crate::roles::diagnostic(&delivery);
+            state["role_status"][id]["request_id"] = json!(request_id);
+            self.checkpoint(state)?;
+            if status == "uncertain" {
+                self.role_notice(
+                    id,
+                    role,
+                    request_id,
+                    &json!({"state":"uncertain","reason":"ambiguous_delivery"}),
+                    state,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn role_notice(
+        &self,
+        id: &str,
+        role: &crate::roles::PersistentRole,
+        request_id: &str,
+        diagnostic: &Value,
+        state: &mut Value,
+    ) -> Result<(), CommandError> {
+        let reason = diagnostic["reason"].as_str().unwrap_or("unavailable");
+        if state["role_requests"][request_id]["notice"] == reason {
+            return Ok(());
+        }
+        if let Some(client) = self.identity_client(id)? {
+            let event = state["role_requests"][request_id]["event"]["id"]
+                .as_str()
+                .unwrap_or("");
+            let text = format!("[buzzr] Request retained for {}/{}: {}. Request {}. No duplicate activation will be started; bridge status shows the pending outcome.", role.project, role.role, reason, request_id);
+            if client.send_reply(&role.channel_id, event, &text).is_ok() {
+                state["role_requests"][request_id]["notice"] = json!(reason);
+                self.checkpoint(state)?;
+            }
+        }
+        Ok(())
     }
 
     fn poll_messages(&self, topology: &Topology, state: &mut Value) -> Result<(), CommandError> {
@@ -411,6 +603,9 @@ impl BridgeService {
             })
             .unwrap_or_default();
         for binding in topology.agents() {
+            if binding.runtime == "persistent-role" {
+                continue;
+            }
             let (identity_id, public_key) = match (&binding.identity_id, &binding.public_key) {
                 (Some(identity_id), Some(public_key))
                     if !identity_id.is_empty() && !public_key.is_empty() =>
@@ -495,9 +690,14 @@ impl BridgeService {
                 load_config(config_path).map_err(|error| CommandError(error.to_string()))?;
             self.herdr = HerdrClient::new(self.config.bridge.herdr_bin.clone());
         }
-        let snapshot = self.herdr.snapshot()?;
+        let (snapshot, snapshot_available) = match self.herdr.snapshot() {
+            Ok(snapshot) => (snapshot, true),
+            Err(_) if !self.config.bridge.persistent_roles.is_empty() => (json!({}), false),
+            Err(error) => return Err(error),
+        };
         let mut topology = build_topology(&snapshot, &self.config);
-        if self.config.bridge.auto_provision_agents
+        if snapshot_available
+            && self.config.bridge.auto_provision_agents
             && topology
                 .agents()
                 .iter()
@@ -515,7 +715,9 @@ impl BridgeService {
             self.config = config;
             topology = refreshed;
         }
-        reconcile(&self.config, &topology, &self.store, false)?;
+        if snapshot_available {
+            reconcile(&self.config, &topology, &self.store, false)?;
+        }
         let routing_enabled = self.config.bridge.routing_enabled;
         let message_poll_seconds = self.config.bridge.message_poll_seconds;
         self.store
@@ -531,6 +733,7 @@ impl BridgeService {
                     None => true,
                 };
                 if routing_enabled && due {
+                    self.poll_roles(&mut state)?;
                     self.poll_messages(&topology, &mut state)?;
                     *last_message_poll = Some(now);
                 }

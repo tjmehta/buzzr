@@ -686,6 +686,7 @@ fn reconcile_unlocked(
         .load_strict()
         .map_err(|error| CommandError(format!("cannot load state: {error}")))?;
     normalize_managed_resources(&mut state);
+    crate::roles::bind_channels(config, &mut state);
     let signer_records = config.reader_credentials();
     let (bridge_key, bridge_auth) = config.bridge_credentials();
     let bridge_pubkey = config
@@ -1137,7 +1138,15 @@ fn reconcile_unlocked(
         }
 
         if config.bridge.remove_departed_agents {
-            let desired = space.member_pubkeys();
+            let desired: Vec<String> = topology
+                .spaces
+                .iter()
+                .filter(|other| {
+                    state["channels"][&other.workspace_id]["channel_id"].as_str()
+                        == Some(&channel_id)
+                })
+                .flat_map(|other| other.member_pubkeys())
+                .collect();
             let tracked: Vec<(String, String)> = state["managed_resources"]["channel_memberships"]
                 .get(&channel_id)
                 .and_then(Value::as_object)
@@ -1223,6 +1232,13 @@ fn reconcile_unlocked(
                 .get("channel_id")
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty());
+            if channel_id.is_some_and(|id| {
+                topology.spaces.iter().any(|space| {
+                    state["channels"][&space.workspace_id]["channel_id"].as_str() == Some(id)
+                })
+            }) {
+                continue; // A persistent project still owns membership in this channel.
+            }
             let name = mapping
                 .get("name")
                 .map(json_str)

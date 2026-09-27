@@ -22,6 +22,10 @@ pub fn default_state() -> Value {
         "last_seen": {},
         "processed": [],
         "pending": [],
+        "role_requests": {},
+        "role_cursors": {},
+        "role_status": {},
+        "role_poll_errors": {},
         "reply_contexts": {},
         "managed_resources": {
             "identities": {},
@@ -409,7 +413,7 @@ mod tests {
     fn default_state_has_all_keys() {
         let state = default_state();
         let map = state.as_object().unwrap();
-        assert_eq!(map.len(), 12);
+        assert_eq!(map.len(), 16);
         assert_eq!(map["version"], json!(STATE_VERSION));
         assert!(map["last_error"].is_null());
         assert!(map["processed"].as_array().unwrap().is_empty());
