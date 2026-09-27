@@ -180,3 +180,30 @@ second listener against the same identities. Do not restart a shared Herdr serve
 as part of this plugin rollout. Complete one owner-authored offline mention →
 native readiness → reply round trip on a compatible host before calling the
 production integration verified.
+
+### Opt-in native startup authorization
+
+With a Herdr Projects build that implements `native-startup`, each projects
+launcher binding may set `"startup_policy": true` (default false). The adapter
+then delegates startup to that command with the explicit project and pane,
+including when a coordinator is blocked. It retains the mention while startup
+settles, resets readiness after an action, and reports held/manual outcomes as
+approval blocks. A disabled or unsupported Projects policy never falls back to
+sending keys itself.
+
+The host owner must also persist the independently scoped authorization in
+`~/.config/herdr-projects/config.toml`:
+
+```toml
+[startup]
+folder_trust = true
+mcp_enablement = true
+```
+
+Deploy the patched Projects CLI and ticker together. This policy accepts only
+recognized native folder-trust and MCP-enablement menus. Hooks-only review,
+OAuth reauthentication, individual tool calls and destructive-action approvals
+remain outside its scope. Existing native pretrust settings are preserved.
+`worker_startup_verified` remains a separate rollout gate; enabling this policy
+does not turn it on. No changes to permission/sandbox settings or launch-time
+quota selection are needed.

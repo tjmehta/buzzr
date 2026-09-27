@@ -9,11 +9,13 @@
   "bindings": {
     "demo/studio-lead": {
       "mode": "coordinator",
+      "startup_policy": false,
       "policy_role": "studio-lead",
       "profiles": {"primary-route": "native-primary", "fallback-route": "native-fallback"}
     },
     "demo/researcher": {
       "mode": "thread",
+      "startup_policy": false,
       "policy_role": "researcher",
       "profiles": {"research-route": "native-research"},
       "instructions_file": "/home/example/role-library/researcher/AGENTS.md",

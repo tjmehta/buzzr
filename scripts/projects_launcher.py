@@ -177,7 +177,19 @@ def current(config, binding, project, journal):
     agent = matches[0]
     if not agent.get("terminal_id"):
         raise Hold("startup", "starting")
+    if binding.get("startup_policy", False):
+        # Herdr Projects owns native chooser recognition, persistent claims,
+        # project membership checks and the user-owned opt-in policy.
+        result = json.loads(output(config, hp(config, "native-startup", project.name,
+                                              "--pane", agent["pane_id"])))
+        state = result.get("state")
+        if state != "complete":
+            journal.pop("ready_since", None)
+            if state in ("waiting", "accepted"):
+                raise Hold("startup", "starting")
+            raise Hold("approval")
     if agent.get("agent_status") in ("idle", "done"):
+
         # Some native versions misclassify startup trust/hook choosers as idle.
         # Refuse known dialogs without printing screen contents or answering them.
         screen = output(
@@ -199,6 +211,9 @@ def current(config, binding, project, journal):
                 "trust this folder",
                 "do you trust",
                 "hooks need review",
+                "new mcp server found in this project",
+                "new mcp servers found in this project",
+                "managed settings require approval",
                 "trust all and continue",
                 "yes, i trust",
                 "trust and continue",

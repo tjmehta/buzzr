@@ -324,6 +324,56 @@ class AdapterTests(unittest.TestCase):
             m.current(self.config, self.binding, self.project, {})
         self.assertEqual(held.exception.reason, "approval")
 
+    def test_opt_in_startup_delegates_to_project_policy_for_blocked_coordinator(self):
+        self.binding["startup_policy"] = True
+        agent = {**self.session, "agent": "claude", "agent_status": "blocked",
+                 "cwd": str(self.project)}
+        journal = {"ready_since": 1}
+        with (patch.object(m, "snapshot", return_value={"agents": [agent]}),
+              patch.object(m, "output", return_value='{"state":"accepted"}') as out,
+              self.assertRaises(m.Hold) as held):
+            m.current(self.config, self.binding, self.project, journal)
+        self.assertEqual((held.exception.reason, held.exception.state), ("startup", "starting"))
+        self.assertNotIn("ready_since", journal)
+        self.assertEqual(out.call_args.args[1], m.hp(self.config, "native-startup", "dev", "--pane", "w1:p1"))
+
+    def test_startup_disabled_held_unknown_or_manual_retains_request(self):
+        self.binding["startup_policy"] = True
+        agent = {**self.session, "agent": "codex", "agent_status": "idle",
+                 "cwd": str(self.project)}
+        for state in ["disabled", "held", "manual", "unrecognized"]:
+            with (patch.object(m, "snapshot", return_value={"agents": [agent]}),
+                  patch.object(m, "output", return_value=json.dumps({"state": state})),
+                  self.assertRaises(m.Hold) as held):
+                m.current(self.config, self.binding, self.project, {})
+            self.assertEqual(held.exception.reason, "approval")
+
+    def test_completed_startup_still_refuses_hooks_and_obeys_busy_state(self):
+        self.binding["startup_policy"] = True
+        agent = {**self.session, "agent": "codex", "agent_status": "idle",
+                 "cwd": str(self.project)}
+        with (patch.object(m, "snapshot", return_value={"agents": [agent]}),
+              patch.object(m, "output", side_effect=['{"state":"complete"}', "Hooks need review"]),
+              self.assertRaises(m.Hold) as held):
+            m.current(self.config, self.binding, self.project, {})
+        self.assertEqual(held.exception.reason, "approval")
+        agent["agent_status"] = "working"
+        with (patch.object(m, "snapshot", return_value={"agents": [agent]}),
+              patch.object(m, "output", return_value='{"state":"complete"}')):
+            session = m.current(self.config, self.binding, self.project, {})
+        self.assertEqual(m.ready_result(session, {}, 10)["state"], "busy")
+
+    def test_startup_completion_requires_new_ready_observations(self):
+        self.binding["startup_policy"] = True
+        agent = {**self.session, "agent": "codex", "agent_status": "idle",
+                 "cwd": str(self.project)}
+        with (patch.object(m, "snapshot", return_value={"agents": [agent]}),
+              patch.object(m, "output", side_effect=['{"state":"complete"}', "Empty native composer"])):
+            session = m.current(self.config, self.binding, self.project, {})
+        journal = {}
+        self.assertEqual(m.ready_result(session, journal, 10)["state"], "starting")
+        self.assertEqual(m.ready_result(session, journal, 13)["state"], "ready")
+
     def test_select_validates_actual_profile_and_native_launcher(self):
         profile_dir = self.root / ".config/herdr-projects"
         profile_dir.mkdir(parents=True)
