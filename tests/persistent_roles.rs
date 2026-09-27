@@ -294,3 +294,21 @@ fn persistent_channel_is_not_archived_when_old_workspace_closes() {
         .iter()
         .any(|a| a.contains("archive") || a.contains("create #")));
 }
+
+#[test]
+fn enrollment_is_durable_even_before_identity_is_provisioned() {
+    let mut f = Fixture::new();
+    f.service.config.identities.clear();
+    let mut state = default_state();
+    f.service.poll_roles(&mut state).unwrap();
+    assert_eq!(state["role_cursors"]["dev-lead"], 1);
+    assert_eq!(
+        state["role_poll_errors"]["dev-lead"],
+        "identity_unavailable"
+    );
+    assert_eq!(
+        f.service.store.load_strict().unwrap()["role_cursors"]["dev-lead"],
+        1
+    );
+    assert!(f.calls().is_empty());
+}

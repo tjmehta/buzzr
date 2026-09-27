@@ -414,12 +414,6 @@ impl BridgeService {
     pub fn poll_roles(&self, state: &mut Value) -> Result<(), CommandError> {
         let now = now_seconds();
         for (id, role) in &self.config.bridge.persistent_roles {
-            let Some(identity) = self.config.identities.get(id) else {
-                continue;
-            };
-            let Some(client) = self.identity_client(id)? else {
-                continue;
-            };
             let cursor = state["role_cursors"][id]
                 .as_i64()
                 .unwrap_or(role.since.unwrap_or(now));
@@ -427,6 +421,16 @@ impl BridgeService {
                 state["role_cursors"][id] = json!(cursor);
                 self.checkpoint(state)?;
             }
+            let Some(identity) = self.config.identities.get(id) else {
+                state["role_poll_errors"][id] = json!("identity_unavailable");
+                self.checkpoint(state)?;
+                continue;
+            };
+            let Some(client) = self.identity_client(id)? else {
+                state["role_poll_errors"][id] = json!("credentials_unavailable");
+                self.checkpoint(state)?;
+                continue;
+            };
             let events = match client.messages(&role.channel_id, cursor.saturating_sub(2)) {
                 Ok(events) => events,
                 Err(_) => {
