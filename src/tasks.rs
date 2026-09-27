@@ -47,6 +47,8 @@ pub enum Request {
     List {},
     Create {
         request_id: String,
+        #[serde(default)]
+        repository: Option<String>,
         title: String,
         content: String,
         #[serde(default)]
@@ -127,7 +129,7 @@ pub fn snapshot(repo: &TaskRepo, issues: &[Event], statuses: &[Event]) -> Result
                         || tag_values(event, "a").contains(&repo.coordinate()))
             })
             .max_by_key(|event| (event.created_at, event.id));
-        result.push(json!({"id":id, "title":tag_values(issue,"subject").first(),
+        result.push(json!({"id":id, "repository":repo.coordinate(), "title":tag_values(issue,"subject").first(),
             "content":issue.content, "author":issue.pubkey.to_hex(), "labels":tag_values(issue,"t"),
             "status":newest.and_then(|e|status_name(e.kind.as_u16())).unwrap_or("open"),
             "status_event":newest.map(|e|e.id.to_hex())}));
@@ -136,14 +138,22 @@ pub fn snapshot(repo: &TaskRepo, issues: &[Event], statuses: &[Event]) -> Result
 }
 
 pub fn list(relay: &str, key: &str, repo: &TaskRepo) -> Result<Value, String> {
+    list_repositories(relay, key, &[repo])
+}
+
+pub fn list_repositories(relay: &str, key: &str, repos: &[&TaskRepo]) -> Result<Value, String> {
+    if repos.is_empty() || repos.len() > 8 {
+        return Err("task reads require one to eight configured repositories".into());
+    }
+    let coordinates: Vec<_> = repos.iter().map(|r| r.coordinate()).collect();
     let issues = query_events(
         relay,
         key,
-        json!({"kinds":[1621],"#a":[repo.coordinate()],"limit":200}),
+        json!({"kinds":[1621],"#a":coordinates,"limit":200}),
     )
     .map_err(|e| e.to_string())?;
     if issues.is_empty() {
-        return snapshot(repo, &[], &[]);
+        return aggregate_snapshot(repos, &[], &[]);
     }
     let ids: Vec<_> = issues.iter().map(|e| e.id.to_hex()).collect();
     let statuses = query_events(
@@ -152,7 +162,44 @@ pub fn list(relay: &str, key: &str, repo: &TaskRepo) -> Result<Value, String> {
         json!({"kinds":[1630,1631,1632,1633],"#e":ids,"limit":200}),
     )
     .map_err(|e| e.to_string())?;
-    snapshot(repo, &issues, &statuses)
+    aggregate_snapshot(repos, &issues, &statuses)
+}
+
+pub fn aggregate_snapshot(
+    repos: &[&TaskRepo],
+    issues: &[Event],
+    statuses: &[Event],
+) -> Result<Value, String> {
+    if repos.is_empty() || issues.iter().any(|e| !repos.iter().any(|r| is_issue(e, r))) {
+        return Err("task repository scope mismatch".into());
+    }
+    let mut tasks = Vec::new();
+    for repo in repos {
+        let selected: Vec<_> = issues
+            .iter()
+            .filter(|e| is_issue(e, repo))
+            .cloned()
+            .collect();
+        tasks.extend(
+            snapshot(repo, &selected, statuses)?["tasks"]
+                .as_array()
+                .unwrap()
+                .clone(),
+        );
+    }
+    Ok(json!({"repository":repos[0].coordinate(),
+        "repositories":repos.iter().map(|r|r.coordinate()).collect::<Vec<_>>(),"tasks":tasks}))
+}
+
+pub fn select_repository<'a>(
+    repos: &[&'a TaskRepo],
+    coordinate: &str,
+) -> Result<&'a TaskRepo, String> {
+    repos
+        .iter()
+        .copied()
+        .find(|r| r.coordinate() == coordinate)
+        .ok_or_else(|| "task repository is not configured for this project".into())
 }
 
 pub fn operation_key(identity: &str, request: &Request) -> Result<Option<String>, String> {
@@ -294,6 +341,7 @@ mod tests {
     fn create() -> Request {
         Request::Create {
             request_id: "one".into(),
+            repository: None,
             title: "Task".into(),
             content: "Body".into(),
             labels: vec![],
@@ -314,6 +362,27 @@ mod tests {
         assert_eq!(
             snapshot(&r, &[issue], &[done]).unwrap()["tasks"][0]["status"],
             "resolved"
+        );
+    }
+
+    #[test]
+    fn multi_repo_snapshot_keeps_source_scope_and_rejects_unconfigured_repo() {
+        let api = repo();
+        let web = TaskRepo {
+            id: "web".into(),
+            ..api.clone()
+        };
+        let one = build(&key(1), None, &api, &create(), None).unwrap();
+        let two = build(&key(1), None, &web, &create(), None).unwrap();
+        let snapshot = aggregate_snapshot(&[&api, &web], &[one.clone(), two.clone()], &[]).unwrap();
+        assert_eq!(snapshot["tasks"].as_array().unwrap().len(), 2);
+        assert_eq!(snapshot["tasks"][0]["repository"], api.coordinate());
+        assert_eq!(snapshot["tasks"][1]["repository"], web.coordinate());
+        assert!(aggregate_snapshot(&[&api], &[one, two], &[]).is_err());
+        assert!(select_repository(&[&api], &web.coordinate()).is_err());
+        assert_eq!(
+            select_repository(&[&api, &web], &web.coordinate()).unwrap(),
+            &web
         );
     }
     #[test]

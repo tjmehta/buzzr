@@ -23,6 +23,10 @@ pub struct PersistentRole {
     pub since: Option<i64>,
     /// Opt-in native Buzz task repository, independent of local checkout paths.
     pub tasks: Option<crate::tasks::TaskRepo>,
+    /// Other repositories belonging to this same project. The primary remains
+    /// the default for creates; reads aggregate the explicit allowlist.
+    #[serde(default)]
+    pub additional_task_repositories: Vec<crate::tasks::TaskRepo>,
 }
 
 pub fn parse(raw: Option<&toml::Value>) -> Result<BTreeMap<String, PersistentRole>, ConfigError> {
@@ -38,8 +42,19 @@ pub fn parse(raw: Option<&toml::Value>) -> Result<BTreeMap<String, PersistentRol
     let mut bindings = HashSet::new();
     let mut task_repositories = BTreeMap::new();
     for (id, role) in &roles {
-        if let Some(repo) = &role.tasks {
+        if role.additional_task_repositories.len() > 7
+            || (role.tasks.is_none() && !role.additional_task_repositories.is_empty())
+        {
+            return Err(ConfigError(
+                "additional task repositories require a primary and at most seven entries".into(),
+            ));
+        }
+        let mut role_repositories = HashSet::new();
+        for repo in role.tasks.iter().chain(&role.additional_task_repositories) {
             repo.validate().map_err(ConfigError)?;
+            if !role_repositories.insert(repo.coordinate()) {
+                return Err(ConfigError("duplicate task repository in role".into()));
+            }
             if task_repositories
                 .insert(repo.coordinate(), &role.project)
                 .is_some_and(|p| p != &role.project)

@@ -13,6 +13,23 @@ repository, even when they share a source-code checkout. This does not copy code
 or change repository/channel permissions. Existing live-session mirrors and
 roles without `tasks` keep their current behavior.
 
+For a project with multiple repositories, keep `tasks` as the default repository
+and add explicit additional members. Up to eight repositories total are allowed:
+
+```toml
+[[persistent_roles.demo-lead.additional_task_repositories]]
+owner = "<64-character repository owner public key>"
+id = "demo-web"
+```
+
+`list` aggregates the entire configured set in bounded queries. Every returned
+task includes its repository coordinate. A create request may specify
+`"repository":"30617:<owner>:demo-web"`; omitting it uses the primary repository.
+Status changes infer the repository from the signed issue. Neither operation
+can select an unconfigured repository, and two projects cannot share any member
+of their task repository sets. Keep this allowlist aligned with the native Buzz
+project's repository membership; no automatic discovery expands write authority.
+
 An authorized role mention includes a `buzzr task --token TOKEN --request -`
 command with the explicit runtime directory. Send JSON through stdin. The token
 selects the role and repository; requests cannot override the project, signing

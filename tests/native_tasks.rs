@@ -46,6 +46,7 @@ fn authenticated_query_resubscribes_and_requires_complete_scoped_results() {
         &repo(),
         &Request::Create {
             request_id: "test".into(),
+            repository: None,
             title: "Test".into(),
             content: "Body".into(),
             labels: vec![],
@@ -126,6 +127,7 @@ fn event_from_another_repository_is_rejected_even_with_valid_signature() {
         &repo(),
         &Request::Create {
             request_id: "one".into(),
+            repository: None,
             title: "Task".into(),
             content: String::new(),
             labels: vec![],
@@ -157,6 +159,7 @@ fn service(root: &std::path::Path, relay: String) -> BridgeService {
         launcher: vec!["unused".into()],
         since: None,
         tasks: Some(repo()),
+        additional_task_repositories: vec![],
     };
     let config = Config {
         bridge: BridgeConfig {
@@ -266,6 +269,48 @@ fn revoked_author_and_wrong_channel_cannot_mutate_tasks() {
         let result = operation(&service, root.path(), &mut s, json!({"op":"list"}));
         assert_eq!(result["error"], "task context is no longer authorized");
     }
+}
+
+#[test]
+fn creates_can_select_only_an_explicit_project_repository() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let second = TaskRepo {
+        id: "web".into(),
+        ..repo()
+    };
+    let expected = second.coordinate();
+    let server = thread::spawn(move || {
+        let mut socket = accept(listener.accept().unwrap().0).unwrap();
+        let event = read(&mut socket);
+        assert!(event[1]["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(["a", expected])));
+        send(&mut socket, json!(["OK", event[1]["id"], true, ""]));
+    });
+    let mut service = service(root.path(), url);
+    service
+        .config
+        .bridge
+        .persistent_roles
+        .get_mut("demo-lead")
+        .unwrap()
+        .additional_task_repositories
+        .push(second.clone());
+    let mut state = state();
+    let payload = json!({"op":"create","request_id":"web-task","repository":second.coordinate(),"title":"Task","content":"Body"});
+    assert_eq!(
+        operation(&service, root.path(), &mut state, payload)["ok"],
+        true
+    );
+    let payload = json!({"op":"create","request_id":"foreign-task","repository":format!("30617:{}:foreign", pubkey()),"title":"Task","content":"Body"});
+    assert_eq!(
+        operation(&service, root.path(), &mut state, payload)["ok"],
+        false
+    );
+    server.join().unwrap();
 }
 
 #[test]

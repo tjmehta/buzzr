@@ -65,6 +65,7 @@ else:
             launcher: vec![launcher.to_str().unwrap().into()],
             since: Some(1),
             tasks: None,
+            additional_task_repositories: vec![],
         };
         let config = Config {
             bridge: BridgeConfig {

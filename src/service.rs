@@ -452,6 +452,9 @@ impl BridgeService {
             .tasks
             .as_ref()
             .ok_or("native tasks are not configured for this role")?;
+        let repos: Vec<_> = std::iter::once(repo)
+            .chain(role.additional_task_repositories.iter())
+            .collect();
         let role_request_id = required_str(context, "role_request_id")?;
         let original = &state["role_requests"][&role_request_id];
         if original["role_id"] != identity
@@ -474,14 +477,47 @@ impl BridgeService {
         let key = key.ok_or("task credentials unavailable")?;
         let relay = &self.config.bridge.relay_url;
         let Some(operation) = tasks::operation_key(&identity, &request)? else {
-            return tasks::list(relay, &key, repo);
+            return tasks::list_repositories(relay, &key, &repos);
         };
+        let stored = &state["task_operations"][&operation];
+        let prior: Option<nostr::Event> = if stored.is_object() {
+            Some(
+                serde_json::from_value(stored["event"].clone())
+                    .map_err(|_| "task journal is invalid")?,
+            )
+        } else {
+            None
+        };
+        let issue = if prior.is_none() {
+            match &request {
+                Request::Status { issue, .. } => tasks::get_issue(relay, &key, issue)?,
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let coordinate = match &request {
+            Request::Create { repository, .. } => {
+                repository.clone().unwrap_or_else(|| repo.coordinate())
+            }
+            Request::Status { .. } => {
+                let scoped_event = prior
+                    .as_ref()
+                    .or(issue.as_ref())
+                    .ok_or("task does not exist")?;
+                tasks::tag_values(scoped_event, "a")
+                    .first()
+                    .cloned()
+                    .ok_or("task repository is missing")?
+            }
+            Request::List {} => unreachable!(),
+        };
+        let repo = tasks::select_repository(&repos, &coordinate)?;
         let digest = hex::encode(Sha256::digest(format!(
             "{}\0{}",
             repo.coordinate(),
             payload
         )));
-        let stored = &state["task_operations"][&operation];
         let event: nostr::Event = if stored.is_object() {
             if stored["digest"] != digest {
                 return Err("task request_id was already used with different content".into());
@@ -489,13 +525,8 @@ impl BridgeService {
             if stored["status"] == "confirmed" {
                 return Ok(stored["result"].clone());
             }
-            serde_json::from_value(stored["event"].clone())
-                .map_err(|_| "task journal is invalid")?
+            prior.ok_or("task journal is invalid")?
         } else {
-            let issue = match &request {
-                Request::Status { issue, .. } => tasks::get_issue(relay, &key, issue)?,
-                _ => None,
-            };
             let event = tasks::build(&key, auth.as_deref(), repo, &request, issue.as_ref())?;
             state["task_operations"][&operation] =
                 json!({"digest":digest,"event":event,"status":"pending"});
