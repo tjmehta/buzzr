@@ -66,6 +66,7 @@ else:
             since: Some(1),
             tasks: None,
             additional_task_repositories: vec![],
+            default_for_channel: false,
         };
         let config = Config {
             bridge: BridgeConfig {
@@ -130,6 +131,94 @@ fn offline_identity_and_explicit_channel_survive_empty_snapshot() {
     assert_eq!(
         state["channels"]["buzzr-role:dev"]["channel_id"],
         "channel-dev"
+    );
+}
+
+#[test]
+fn default_channel_routes_new_owner_messages_without_replaying_history_or_bots() {
+    let mut f = Fixture::new();
+    f.service
+        .config
+        .bridge
+        .persistent_roles
+        .get_mut("dev-lead")
+        .unwrap()
+        .default_for_channel = true;
+    let mut old = Fixture::event("old");
+    old["tags"] = json!([]);
+    f.events(json!([old]));
+    let mut state = default_state();
+    f.service.poll_roles(&mut state).unwrap();
+    assert_eq!(state["role_requests"].as_object().unwrap().len(), 0);
+    let enrolled = state["role_cursors"]["default:dev-lead"].as_i64().unwrap();
+    let mut owner = Fixture::event("plain-owner");
+    owner["created_at"] = json!(enrolled);
+    owner["tags"] = json!([]);
+    let mut other = owner.clone();
+    other["id"] = json!("other");
+    other["pubkey"] = json!("c".repeat(64));
+    let mut bot = owner.clone();
+    bot["id"] = json!("bot");
+    bot["pubkey"] = json!("b".repeat(64));
+    let mut addressed_elsewhere = owner.clone();
+    addressed_elsewhere["id"] = json!("elsewhere");
+    addressed_elsewhere["tags"] = json!([["p", "c".repeat(64)]]);
+    f.events(json!([owner, other, bot, addressed_elsewhere]));
+    // Even an otherwise broad bridge policy never routes bots as default-owner input.
+    f.service.config.bridge.respond_to = "anyone".into();
+    f.service.poll_roles(&mut state).unwrap();
+    assert_eq!(state["role_requests"].as_object().unwrap().len(), 1);
+    f.mode("deliver");
+    let id = roles::request_id("dev-lead", "channel-dev", "plain-owner");
+    state["role_requests"][&id]["not_before"] = json!(0);
+    f.service.poll_roles(&mut state).unwrap();
+    state = f.service.store.load_strict().unwrap();
+    f.service.poll_roles(&mut state).unwrap();
+    assert_eq!(f.calls().iter().filter(|v| v["op"] == "deliver").count(), 1);
+    let role = f
+        .service
+        .config
+        .bridge
+        .persistent_roles
+        .get_mut("dev-lead")
+        .unwrap();
+    role.default_for_channel = false;
+    f.service.poll_roles(&mut state).unwrap();
+    assert!(state["role_cursors"].get("default:dev-lead").is_none());
+}
+
+#[test]
+fn disabling_default_channel_holds_a_queued_plain_message() {
+    let mut f = Fixture::new();
+    f.service
+        .config
+        .bridge
+        .persistent_roles
+        .get_mut("dev-lead")
+        .unwrap()
+        .default_for_channel = true;
+    let mut state = default_state();
+    f.service.poll_roles(&mut state).unwrap();
+    let mut event = Fixture::event("plain");
+    event["created_at"] = state["role_cursors"]["default:dev-lead"].clone();
+    event["tags"] = json!([]);
+    f.events(json!([event]));
+    f.service.poll_roles(&mut state).unwrap();
+    f.service
+        .config
+        .bridge
+        .persistent_roles
+        .get_mut("dev-lead")
+        .unwrap()
+        .default_for_channel = false;
+    f.mode("deliver");
+    let id = roles::request_id("dev-lead", "channel-dev", "plain");
+    state["role_requests"][&id]["not_before"] = json!(0);
+    f.service.poll_roles(&mut state).unwrap();
+    assert!(!f.calls().iter().any(|v| v["op"] == "deliver"));
+    assert_eq!(
+        state["role_status"]["dev-lead"]["reason"],
+        "authorization_changed"
     );
 }
 #[test]
@@ -263,6 +352,14 @@ fn late_reply_confirms_uncertain_delivery_under_stable_role_identity() {
         .unwrap()
         .to_string();
     fs::write(
+        f.service.outbox_dir.join("progress.request.json"),
+        json!({"token":token,"content":"Writer and QA started","progress":true}).to_string(),
+    )
+    .unwrap();
+    f.service.process_outbox(&mut state).unwrap();
+    assert!(state["reply_contexts"].get(&token).is_some());
+    assert_eq!(state["role_requests"][&id]["status"], "delivered");
+    fs::write(
         f.service.outbox_dir.join("reply.request.json"),
         json!({"token":token,"content":"Completed"}).to_string(),
     )
@@ -273,6 +370,13 @@ fn late_reply_confirms_uncertain_delivery_under_stable_role_identity() {
     let sent = fs::read_to_string(f.dir.path().join("notices")).unwrap();
     assert!(sent.contains("channel-dev"));
     assert!(sent.contains("Completed"));
+    assert!(sent.contains("Writer and QA started"));
+}
+
+#[test]
+fn channel_default_is_unique_even_with_multiple_roles_in_a_project() {
+    let raw: toml::Value = toml::from_str("[a]\nproject='dev'\nrole='lead'\nchannel_id='same'\nchannel_name='dev'\nlauncher=['launch']\ndefault_for_channel=true\n[b]\nproject='dev'\nrole='qa'\nchannel_id='same'\nchannel_name='dev'\nlauncher=['launch']\ndefault_for_channel=true").unwrap();
+    assert!(roles::parse(Some(&raw)).is_err());
 }
 
 #[test]

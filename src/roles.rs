@@ -27,6 +27,9 @@ pub struct PersistentRole {
     /// the default for creates; reads aggregate the explicit allowlist.
     #[serde(default)]
     pub additional_task_repositories: Vec<crate::tasks::TaskRepo>,
+    /// Opt-in: unaddressed messages from the configured human go to this role.
+    #[serde(default)]
+    pub default_for_channel: bool,
 }
 
 pub fn parse(raw: Option<&toml::Value>) -> Result<BTreeMap<String, PersistentRole>, ConfigError> {
@@ -41,7 +44,13 @@ pub fn parse(raw: Option<&toml::Value>) -> Result<BTreeMap<String, PersistentRol
     let mut channels = BTreeMap::new();
     let mut bindings = HashSet::new();
     let mut task_repositories = BTreeMap::new();
+    let mut default_channels = HashSet::new();
     for (id, role) in &roles {
+        if role.default_for_channel && !default_channels.insert(&role.channel_id) {
+            return Err(ConfigError(
+                "a channel can have only one default role".into(),
+            ));
+        }
         if role.additional_task_repositories.len() > 7
             || (role.tasks.is_none() && !role.additional_task_repositories.is_empty())
         {

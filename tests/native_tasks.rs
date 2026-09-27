@@ -160,6 +160,7 @@ fn service(root: &std::path::Path, relay: String) -> BridgeService {
         since: None,
         tasks: Some(repo()),
         additional_task_repositories: vec![],
+        default_for_channel: false,
     };
     let config = Config {
         bridge: BridgeConfig {
@@ -320,11 +321,18 @@ fn live_read_only() {
         buzzr::config::load_config(&PathBuf::from(std::env::var("BUZZR_TEST_CONFIG").unwrap()))
             .unwrap();
     let role = std::env::var("BUZZR_TEST_ROLE").unwrap();
-    let repo: TaskRepo = serde_json::from_str(&std::env::var("BUZZR_TEST_REPO").unwrap()).unwrap();
+    let configured = &config.bridge.persistent_roles[&role];
+    let repos: Vec<_> = configured
+        .tasks
+        .iter()
+        .chain(&configured.additional_task_repositories)
+        .collect();
     let (key, _) = config.identity_credentials(&role).unwrap();
-    let result = buzzr::tasks::list(&config.bridge.relay_url, &key.unwrap(), &repo).unwrap();
+    let result =
+        buzzr::tasks::list_repositories(&config.bridge.relay_url, &key.unwrap(), &repos).unwrap();
     println!(
-        "Live read-only native tasks: {}",
-        result["tasks"].as_array().unwrap().len()
+        "Live read-only native tasks: {} across {} repositories",
+        result["tasks"].as_array().unwrap().len(),
+        repos.len()
     );
 }

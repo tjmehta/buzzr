@@ -3,6 +3,7 @@
 project = "demo"
 role = "studio-lead"
 channel_id = "existing-channel-id"
-channel_name = "project-demo"
+channel_name = "demo"
+# default_for_channel = true  # optional: owner messages need no @mention
 launcher = ["/usr/bin/python3", "/opt/buzzr/scripts/projects_launcher.py", "--config", "/home/example/.config/buzzr-projects/launcher.json"]
 # since = 1800000000  # optional explicit history enrollment

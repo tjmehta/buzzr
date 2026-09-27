@@ -1070,7 +1070,7 @@ fn cmd_task(token: &str, request: &str) -> Result<i32, CliError> {
     Ok(if result["ok"] == true { 0 } else { 1 })
 }
 
-fn cmd_reply(token: &str, content: &str) -> Result<i32, CliError> {
+fn cmd_reply(token: &str, content: &str, progress: bool) -> Result<i32, CliError> {
     let content = if content == "-" {
         let mut buffer = String::new();
         std::io::stdin().read_to_string(&mut buffer)?;
@@ -1078,7 +1078,11 @@ fn cmd_reply(token: &str, content: &str) -> Result<i32, CliError> {
     } else {
         content.to_string()
     };
-    let result = queue_reply(token, &content, Duration::from_secs(30))?;
+    let result = if progress {
+        crate::service::queue_progress(token, &content, Duration::from_secs(30))?
+    } else {
+        queue_reply(token, &content, Duration::from_secs(30))?
+    };
     println!(
         "{}",
         serde_json::to_string(&result).map_err(|error| CliError::Value(error.to_string()))?
@@ -1139,6 +1143,7 @@ pub enum Command {
     Reply {
         token: String,
         content: String,
+        progress: bool,
     },
 }
 
@@ -1363,6 +1368,7 @@ fn flag_specs(name: &str) -> &'static [FlagSpec] {
         "reply" => spec!(
             "--token", "TOKEN", true, true, "reply token from the bridge prompt";
             "--content", "CONTENT", true, true, "reply text, or - to read stdin";
+            "--progress", "", false, false, "post a project update without consuming the token";
         ),
         "task" => spec!(
             "--token", "TOKEN", true, true, "role reply token from an authorized bridge request";
@@ -1534,6 +1540,7 @@ fn parse_command(command_name: &str, args: &[String]) -> Result<Command, ParseFa
         }
         "daemon" => Command::Daemon,
         "reply" => Command::Reply {
+            progress: has_flag(&flags, "--progress"),
             token: last_value(&flags, "--token")
                 .unwrap_or_default()
                 .to_string(),
@@ -1633,7 +1640,11 @@ fn run(parsed: &Parsed) -> Result<i32, CliError> {
         Command::Deactivate => cmd_deactivate(parsed),
         Command::Deprovision(args) => cmd_deprovision(parsed, args),
         Command::Daemon => cmd_daemon(parsed),
-        Command::Reply { token, content } => cmd_reply(token, content),
+        Command::Reply {
+            token,
+            content,
+            progress,
+        } => cmd_reply(token, content, *progress),
         Command::Task { token, request } => cmd_task(token, request),
     }
 }

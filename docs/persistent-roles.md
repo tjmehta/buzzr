@@ -36,9 +36,16 @@ share its explicit channel. Preserve config, secrets, inbox and launcher journal
 across restarts. Do not clone them into a second running bridge.
 
 The existing `respond_to` policy applies before enqueue and again before delivery.
-Use `owner-only` unless a broader allowlist is intentional. Only structured Nostr
-pubkey mentions trigger activation; message text never selects a project,
-launcher or command. `since` explicitly enrolls old events; otherwise enrollment
+Use `owner-only` unless a broader allowlist is intentional. By default, only structured Nostr
+pubkey mentions trigger activation. Set `default_for_channel = true` on one role
+per channel to also route ordinary, nonempty messages from `bridge.human_pubkey`
+to that role. Any explicit pubkey mention takes precedence over this default.
+Plain messages from bots or other users never trigger the default, even with a
+broader `respond_to` policy. Message text never selects a project, launcher or command.
+The default starts with new messages at its first poll, independently of `since`,
+so enabling it does not replay old unmentioned conversations. Its enrollment time
+and delivery ledger survive restarts. Disabling it holds pending plain messages
+for operator review rather than delivering them under a revoked policy. `since` explicitly enrolls old events; otherwise enrollment
 starts at the first poll. A two-second cursor overlap plus a permanent dedup
 ledger handles ordinary replay. A full 200-event page raises `history_gap` and
 holds the cursor: the current Buzz CLI has no reliable pagination contract here.
@@ -217,3 +224,14 @@ remain outside its scope. Existing native pretrust settings are preserved.
 `worker_startup_verified` remains a separate rollout gate; enabling this policy
 does not turn it on. No changes to permission/sandbox settings or launch-time
 quota selection are needed.
+
+## Project progress replies
+
+The generated role prompt includes `buzzr reply --token TOKEN --content -`.
+Add `--progress` for a substantive team-start, blocker, or review update. The
+bridge posts it as the same lead in the original project thread and retains the
+token for later task operations and replies. Send the final result without
+`--progress`; this consumes the token. Role binding and author authorization are
+checked again before publication. Progress is available only for persistent roles.
+Workers report internally through Herdr Projects; the lead owns user-facing
+updates. A terminal becoming idle is not evidence that the task is complete.
